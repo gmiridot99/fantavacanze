@@ -1,0 +1,9 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Small defaults to keep things tidy if Tailwind is missing */
+html, body, #root { height: 100%; }
+body { @apply bg-slate-50 text-slate-900; }
+button { @apply cursor-pointer; }
