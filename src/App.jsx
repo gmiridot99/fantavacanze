@@ -1,15 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Upload, Undo2, Pencil, Trash2, Image as ImageIcon, Download, Share2, Copy } from "lucide-react";
+import { Plus, Upload, Undo2, Pencil, Trash2, Image as ImageIcon, Download, Copy } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { motion } from "framer-motion";
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
+import { Button } from "./components/ui/button";
 
-/* ---------- stato persistito ---------- */
-const LS_KEY = "fantavacanza_state_v1";
-const saveState = (s) => { try { localStorage.setItem(LS_KEY, JSON.stringify(s)); } catch {} };
-const loadState = () => { try { const r = localStorage.getItem(LS_KEY); return r ? JSON.parse(r) : null; } catch { return null; } };
+import {
+  dbLoadAll,
+  dbUpsertPlayers,
+  dbUpsertActivities,
+  dbInsertEvent,
+  dbDeleteEvent,
+  dbResetEvents,
+  dbSubscribeEvents,
+  dbUpdatePlayerAvatarUrl,
+} from "./db";
+import { supabase } from "./supabaseClient";
 
-/* ---------- CSV helpers (senza librerie esterne) ---------- */
+/* ---------- CSV helpers ---------- */
 function splitCSVLine(line) {
   const out = []; let cur = ""; let inQ = false;
   for (let i = 0; i < line.length; i++) {
@@ -38,119 +46,207 @@ function toCSV(headers, rows) {
 
 /* ---------- util ---------- */
 const palette = ["#ef4444","#3b82f6","#10b981","#f59e0b","#8b5cf6"];
-const seedPlayers = ["Marco", "Luca", "Comu", "Gio", "Tommi"].map((n,i)=>({ id:`P${i+1}`, name:n, color:palette[i], avatar:null }));
-const seedActivities = [
-  { id:"A1", name:"Sveglia all'alba", points:5 },
-  { id:"A2", name:"Tuffo epico", points:8 },
-  { id:"A3", name:"Perdi le chiavi", points:-6 }
-];
 function startOfToday(){ const d=new Date(); d.setHours(0,0,0,0); return d.getTime(); }
 
 /* ===================== APP ===================== */
 export default function FantavacanzaApp() {
-  const loaded = loadState();
-  const [players, setPlayers] = useState((loaded?.players || seedPlayers).map((p,i)=>({...p, color:p.color||palette[i%palette.length]})));
-  const [activities, setActivities] = useState(loaded?.activities || seedActivities);
-  const [events, setEvents] = useState(loaded?.events || []);
-  const [baseTs, setBaseTs] = useState(loaded?.baseTs || startOfToday());
-  const [selPlayer, setSelPlayer] = useState(players[0]?.id || "");
-  const [selActivity, setSelActivity] = useState(activities[0]?.id || "");
-  const [dayNum, setDayNum] = useState(1 + Math.floor((Date.now() - baseTs)/86400000));
+  const [players, setPlayers] = useState([]);
+  const [activities, setActivities] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [baseTs, setBaseTs] = useState(startOfToday());
+
+  const [selPlayer, setSelPlayer] = useState("");
+  const [selActivity, setSelActivity] = useState("");
+  const [dayNum, setDayNum] = useState(1);
   const [tab, setTab] = useState("add");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showShare, setShowShare] = useState(false);
-  const [canEdit, setCanEdit] = useState(true);
+  const [canEdit, setCanEdit] = useState(false);
   const noteRef = useRef(null);
 
-  useEffect(()=>saveState({players,activities,events,baseTs}),[players,activities,events,baseTs]);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get("mode");
+    const token = params.get("token");
+    const saved = localStorage.getItem("fantavacanza_editor_token");
 
-  useEffect(()=>{ if(!players.find(p=>p.id===selPlayer)) setSelPlayer(players[0]?.id||""); },[players]);
-  useEffect(()=>{ if(!activities.find(a=>a.id===selActivity)) setSelActivity(activities[0]?.id||""); },[activities]);
+    if (mode === "view") { setCanEdit(false); return; }
+    if (token) { localStorage.setItem("fantavacanza_editor_token", token); setCanEdit(true); return; }
+    setCanEdit(Boolean(saved));
+  }, []);
 
-  useEffect(()=>{ const params=new URLSearchParams(location.search); const mode=params.get("mode"); const token=params.get("token"); const saved=localStorage.getItem("fantavacanza_editor_token"); if(saved && token===saved) setCanEdit(true); else if(mode==="view") setCanEdit(false); },[]);
+  useEffect(() => { if (!canEdit && showShare) setShowShare(false); }, [canEdit, showShare]);
 
-  const activityById = useMemo(()=>Object.fromEntries(activities.map(a=>[a.id,a])),[activities]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const { players: pl, activities: ac, events: ev } = await dbLoadAll();
+        setPlayers(pl);
+        setActivities(ac);
+        setEvents(ev);
+        setSelPlayer(pl[0]?.id || "");
+        setSelActivity(ac[0]?.id || "");
+        setDayNum(1 + Math.floor((Date.now() - baseTs)/86400000));
+      } catch (e) {
+        console.error("Load DB error:", e);
+      }
+    })();
 
-  const scores = useMemo(()=>{
-    const map = new Map(players.map(p=>[p.id,{total:0,maxSingle:-Infinity}]));
+    const unsub = dbSubscribeEvents(async () => {
+      try {
+        const { events: ev } = await dbLoadAll();
+        setEvents(ev);
+      } catch {}
+    });
+    return () => unsub();
+  }, [baseTs]);
+
+  useEffect(() => { if (!players.find(p => p.id === selPlayer)) setSelPlayer(players[0]?.id || ""); }, [players]);
+  useEffect(() => { if (!activities.find(a => a.id === selActivity)) setSelActivity(activities[0]?.id || ""); }, [activities]);
+
+  const activityById = useMemo(() => Object.fromEntries(activities.map(a => [a.id, a])), [activities]);
+
+  const scores = useMemo(() => {
+    const map = new Map(players.map(p => [p.id, { total: 0, maxSingle: -Infinity }]));
     for (const e of events) {
-      const s = map.get(e.playerId); if(!s) continue;
+      const s = map.get(e.player_id);
+      if (!s) continue;
       s.total += e.points;
       if (e.points > s.maxSingle) s.maxSingle = e.points;
     }
     return map;
-  },[events,players]);
+  }, [events, players]);
 
-  const leaderboard = useMemo(()=>{
-    return [...players].sort((a,b)=>{
-      const sa=scores.get(a.id)||{total:0,maxSingle:-Infinity};
-      const sb=scores.get(b.id)||{total:0,maxSingle:-Infinity};
-      if (sb.total!==sa.total) return sb.total-sa.total;
-      if (sb.maxSingle!==sa.maxSingle) return sb.maxSingle-sa.maxSingle;
+  const leaderboard = useMemo(() => {
+    return [...players].sort((a, b) => {
+      const sa = scores.get(a.id) || { total: 0, maxSingle: -Infinity };
+      const sb = scores.get(b.id) || { total: 0, maxSingle: -Infinity };
+      if (sb.total !== sa.total) return sb.total - sa.total;
+      if (sb.maxSingle !== sa.maxSingle) return sb.maxSingle - sa.maxSingle;
       return a.name.localeCompare(b.name);
     });
-  },[players,scores]);
+  }, [players, scores]);
 
-  const dailySeries = useMemo(()=>{
-    const ids = players.map(p=>p.id);
-    if (events.length===0) {
-      return { data:[{label:"Giorno 0",...Object.fromEntries(ids.map(id=>[id,0]))}] };
+  const dailySeries = useMemo(() => {
+    const ids = players.map(p => p.id);
+    if (events.length === 0) {
+      return { data: [{ label: "Giorno 0", ...Object.fromEntries(ids.map(id => [id, 0])) }] };
     }
-    const norm = events.map(e=>({...e, day:e.day ?? Math.max(1,Math.floor((e.ts-baseTs)/86400000)+1)}));
-    const maxDay = Math.max(1,...norm.map(e=>e.day));
-    const accum = Object.fromEntries(ids.map(id=>[id,0]));
-    const arr = [{label:"Giorno 0",...Object.fromEntries(ids.map(id=>[id,0]))}];
-    for (let d=1; d<=maxDay; d++){
-      for (const e of norm.filter(x=>x.day===d)) accum[e.playerId]=(accum[e.playerId]||0)+e.points;
-      const row={label:`Giorno ${d}`}; for (const id of ids) row[id]=accum[id]||0; arr.push(row);
+    const norm = events.map(e => ({ ...e, day: e.day ?? Math.max(1, Math.floor((e.ts - baseTs) / 86400000) + 1) }));
+    const maxDay = Math.max(1, ...norm.map(e => e.day));
+    const accum = Object.fromEntries(ids.map(id => [id, 0]));
+    const arr = [{ label: "Giorno 0", ...Object.fromEntries(ids.map(id => [id, 0])) }];
+    for (let d = 1; d <= maxDay; d++) {
+      for (const e of norm.filter(x => x.day === d)) accum[e.player_id] = (accum[e.player_id] || 0) + e.points;
+      const row = { label: `Giorno ${d}` }; for (const id of ids) row[id] = accum[id] || 0; arr.push(row);
     }
-    return { data:arr };
-  },[events,players,baseTs]);
+    return { data: arr };
+  }, [events, players, baseTs]);
 
-  function addEvent(){
-    if(!canEdit) return;
-    if(!selPlayer || !selActivity) { toast.error("Seleziona giocatore e attività"); return; }
-    const act = activityById[selActivity]; if(!act){ toast.error("Attività non valida"); return; }
+  async function addEvent() {
+    if (!canEdit) return;
+    if (!selPlayer || !selActivity) { toast.error("Seleziona giocatore e attività"); return; }
+    const act = activityById[selActivity]; if (!act) { toast.error("Attività non valida"); return; }
+
     const d = Math.max(1, Math.floor(Number(dayNum)) || 1);
-    const ts = baseTs + (d-1)*86400000;
-    const ev = { id:crypto?.randomUUID?.()||Math.random().toString(36).slice(2), playerId:selPlayer, activityId:selActivity, points:Number(act.points)||0, note:noteRef.current?.value||"", ts, day:d, history:[] };
-    setEvents(e=>[ev,...e]);
-    if(noteRef.current) noteRef.current.value="";
-    toast.success("Attività registrata ✨");
-  }
-  function undoLast(){ if(!canEdit) return; setEvents(e=>e.slice(1)); }
-  function updateEvent(id,patch){ if(!canEdit) return; setEvents(all=>all.map(e=> e.id!==id ? e : ({...e,history:[...(e.history||[]),{playerId:e.playerId,activityId:e.activityId,points:e.points,note:e.note,ts:e.ts,day:e.day}],...patch}))); }
-  function deleteEvent(id){ if(!canEdit) return; setEvents(all=>all.filter(e=>e.id!==id)); }
-  function resetScores(){ if(!canEdit) return; setEvents([]); setBaseTs(startOfToday()); setDayNum(1); toast.success("Punteggi resettati"); }
+    const ts = baseTs + (d - 1) * 86400000;
 
-  function onUploadActivities(file){
-    if(!canEdit) return;
-    const reader=new FileReader();
-    reader.onload=()=>{
-      try{
-        const {header,rows}=parseCSV(String(reader.result||""));
-        const lc=header.map(h=>(h||"").trim().toLowerCase());
-        const idxName = lc.findIndex(h=>["attivita","attività","name"].includes(h));
-        const idxPts  = lc.findIndex(h=>["punteggio","points"].includes(h));
-        const idxId   = lc.findIndex(h=>["id","activity_id"].includes(h));
-        const exclude = new Set(["attivita","attività","name","punteggio","points","premi extra"]);
-        const maybePlayers = header.filter(h=>!exclude.has((h||"").trim().toLowerCase()));
-        const acts = rows.map((r,i)=>{
-          const id = idxId>=0 && r[idxId] ? r[idxId] : `CSV_${i+1}`;
-          const nm = idxName>=0 ? r[idxName] : `Attività ${i+1}`;
-          const rawPts = idxPts>=0 ? r[idxPts] : "0";
-          const points = Number(String(rawPts).replace(",",".")) || 0;
-          return { id:String(id).trim(), name:String(nm).trim(), points };
-        }).filter(a=>a.name);
-        if(!acts.length) throw new Error();
+    try {
+      await dbInsertEvent({
+        player_id: selPlayer,
+        activity_id: selActivity,
+        points: Number(act.points) || 0,
+        note: noteRef.current?.value || "",
+        ts, day: d,
+      });
+      if (noteRef.current) noteRef.current.value = "";
+      toast.success("Attività registrata ✨");
+    } catch (e) {
+      console.error(e); toast.error("Errore salvataggio");
+    }
+  }
+
+  async function undoLast() {
+    if (!canEdit) return;
+    const last = events[events.length - 1];
+    if (!last) return;
+    try { await dbDeleteEvent(last.id); } catch (e) { console.error(e); }
+  }
+
+  async function updateEvent(evtId, patch) {
+    if (!canEdit) return;
+    try {
+      const { error } = await supabase.from("events").update(patch).eq("id", evtId);
+      if (error) throw error;
+    } catch (e) {
+      console.error(e); toast.error("Errore aggiornamento evento");
+    }
+  }
+
+  async function deleteEvent(id) {
+    if (!canEdit) return;
+    try { await dbDeleteEvent(id); } catch (e) { console.error(e); }
+  }
+
+  async function resetScores() {
+    if (!canEdit) return;
+    try {
+      await dbResetEvents();
+      setBaseTs(startOfToday());
+      setDayNum(1);
+      toast.success("Punteggi resettati");
+    } catch (e) {
+      console.error(e); toast.error("Errore reset");
+    }
+  }
+
+  async function onUploadActivities(file) {
+    if (!canEdit || !file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const { header, rows } = parseCSV(String(reader.result || ""));
+        const lc = header.map(h => (h || "").trim().toLowerCase());
+
+        const idxName = lc.findIndex(h => ["attivita", "attività", "name"].includes(h));
+        const idxPts  = lc.findIndex(h => ["punteggio", "points"].includes(h));
+        const idxId   = lc.findIndex(h => ["id", "activity_id"].includes(h));
+
+        const exclude = new Set(["attivita", "attività", "name", "punteggio", "points", "premi extra"]);
+        const maybePlayersHeaders = header.filter(h => !exclude.has((h || "").trim().toLowerCase()));
+
+        const acts = rows.map((r, i) => {
+          const id = idxId >= 0 && r[idxId] ? r[idxId] : `CSV_${i + 1}`;
+          const nm = idxName >= 0 ? r[idxName] : `Attività ${i + 1}`;
+          const rawPts = idxPts >= 0 ? r[idxPts] : "0";
+          const points = Number(String(rawPts).replace(",", ".")) || 0;
+          return { id: String(id).trim(), name: String(nm).trim(), points };
+        }).filter(a => a.name);
+
+        if (!acts.length) throw new Error("no activities");
+
         setActivities(acts);
-        setSelActivity(acts[0]?.id||"");
-        if(maybePlayers.length){
-          const pls = maybePlayers.map((n,i)=>({ id:`P${i+1}`, name:(n||"").trim(), color:palette[i%palette.length] })).slice(0,12);
-          if(pls.length){ setPlayers(pls); setSelPlayer(pls[0]?.id||""); }
+        setSelActivity(acts[0]?.id || "");
+
+        let pls = [];
+        if (maybePlayersHeaders.length) {
+          pls = maybePlayersHeaders
+            .map((n, i) => ({ id: `P${i + 1}`, name: (n || "").trim(), color: palette[i % palette.length] }))
+            .slice(0, 12);
+          if (pls.length) {
+            setPlayers(pls);
+            setSelPlayer(pls[0]?.id || "");
+          }
         }
-        toast.success(`Importate ${acts.length} attività`);
-      }catch{ toast.error("CSV non valido"); }
+
+        await dbUpsertActivities(acts);
+        if (pls.length) await dbUpsertPlayers(pls);
+
+        toast.success(`Importate ${acts.length} attività (salvate su Supabase)`);
+      } catch (e) {
+        console.error(e);
+        toast.error("CSV non valido");
+      }
     };
     reader.readAsText(file);
   }
@@ -160,9 +256,9 @@ export default function FantavacanzaApp() {
     const rows=events.slice().reverse().map(e=>[
       e.id,
       e.day ?? Math.max(1,Math.floor((e.ts-baseTs)/86400000)+1),
-      new Date(e.ts).toISOString(),
-      players.find(p=>p.id===e.playerId)?.name || "",
-      activityById[e.activityId]?.name || "",
+      new Date(Number(e.ts)).toISOString(),
+      players.find(p=>p.id===e.player_id)?.name || "",
+      activityById[e.activity_id]?.name || "",
       e.points,
       e.note || ""
     ]);
@@ -172,11 +268,36 @@ export default function FantavacanzaApp() {
     URL.revokeObjectURL(url);
   }
 
-  function onAvatarChange(pId,file){
-    const reader=new FileReader();
-    reader.onload=()=> setPlayers(all=>all.map(p=>p.id===pId?{...p,avatar:String(reader.result)}:p));
-    reader.readAsDataURL(file);
+  async function onAvatarChange(pId, file) {
+  if (!canEdit || !file) return;
+
+  try {
+    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+    const path = `${pId}/${Date.now()}.${ext}`;
+
+    // 1) upload nel bucket "players"
+    const { error: upErr } = await supabase
+      .storage
+      .from("players")
+      .upload(path, file, { upsert: true });
+    if (upErr) throw upErr;
+
+    // 2) prendi l'URL pubblico
+    const { data } = supabase.storage.from("players").getPublicUrl(path);
+    const publicUrl = data?.publicUrl;
+
+    // 3) salva l'URL nel DB
+    await dbUpdatePlayerAvatarUrl(pId, publicUrl);
+
+    // 4) aggiorna subito l'UI
+    setPlayers(all => all.map(p => p.id === pId ? { ...p, avatar_url: publicUrl } : p));
+    toast.success("Foto aggiornata ✅");
+  } catch (e) {
+    console.error(e);
+    toast.error("Errore upload foto");
   }
+}
+
 
   function ensureEditorToken(){
     let t=localStorage.getItem("fantavacanza_editor_token");
@@ -186,17 +307,13 @@ export default function FantavacanzaApp() {
   function getShareLinks(){
     const url=new URL(location.href); url.search="";
     const base=url.origin+url.pathname;
-    return {
-      editor:`${base}?mode=edit&token=${ensureEditorToken()}`,
-      viewer:`${base}?mode=view`
-    };
+    return { editor:`${base}?mode=edit&token=${ensureEditorToken()}`, viewer:`${base}?mode=view` };
   }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-white to-slate-50 p-3 sm:p-4 md:p-8">
       <Toaster richColors position="top-center" />
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
         <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="flex items-center justify-between">
             <button
@@ -222,14 +339,15 @@ export default function FantavacanzaApp() {
             <button onClick={resetScores} disabled={!canEdit} className="inline-flex items-center gap-2 rounded-2xl px-3 py-2 w-full sm:w-auto bg-red-600 text-white border border-red-700 hover:bg-red-700 disabled:opacity-50">
               Reset punteggi
             </button>
-            <button onClick={()=>setShowShare(s=>!s)} className="inline-flex items-center gap-2 rounded-2xl border px-3 py-2 w-full sm:w-auto">
-              <Share2 className="w-4 h-4"/> Condividi
-            </button>
+            {canEdit && (
+              <Button variant="outline" onClick={() => setShowShare(s => !s)} className="w-full sm:w-auto">
+                Condividi
+              </Button>
+            )}
           </div>
         </header>
 
-        {/* Share panel */}
-        {showShare && (
+        {canEdit && showShare && (
           <div className="rounded-2xl border bg-white p-4 space-y-3">
             <div className="font-semibold">Condividi</div>
             {(() => {
@@ -258,7 +376,6 @@ export default function FantavacanzaApp() {
           </div>
         )}
 
-        {/* Drawer mobile */}
         {menuOpen && (
           <div className="sm:hidden fixed inset-0 z-50">
             <div className="absolute inset-0 bg-black/30" onClick={()=>setMenuOpen(false)} />
@@ -272,7 +389,6 @@ export default function FantavacanzaApp() {
           </div>
         )}
 
-        {/* Classifica + Chart */}
         <div className="rounded-2xl border bg-white p-3 md:p-6 space-y-4">
           <h2 className="text-xl font-semibold">Classifica</h2>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
@@ -281,7 +397,12 @@ export default function FantavacanzaApp() {
               return (
                 <motion.div key={p.id} layout className="border rounded-2xl p-3 flex flex-col items-center text-center bg-white" style={{ borderColor: players.find(x=>x.id===p.id)?.color, borderWidth: 2 }}>
                   <div className="relative">
-                    <img src={p.avatar || ("https://api.dicebear.com/8.x/thumbs/svg?seed="+encodeURIComponent(p.name))} alt={p.name} className="w-14 h-14 md:w-16 md:h-16 rounded-full object-cover"/>
+                    <img
+                      src={p.avatar_url || ("https://api.dicebear.com/8.x/thumbs/svg?seed=" + encodeURIComponent(p.name))}
+                      alt={p.name}
+                      className="w-14 h-14 md:w-16 md:h-16 rounded-full object-cover"
+                    />
+
                     <span className="absolute -top-2 -right-2 rounded-full text-xs bg-black text-white px-2 py-1">{idx+1}</span>
                   </div>
                   <div className="mt-2 font-medium truncate max-w-[10rem]">{p.name}</div>
@@ -307,14 +428,12 @@ export default function FantavacanzaApp() {
           </div>
         </div>
 
-        {/* Tab bar desktop */}
         <div className="hidden sm:flex gap-2">
           <button onClick={()=>setTab("add")} className={`px-3 py-2 rounded-xl border ${tab==="add"?"bg-black text-white":"bg-white"}`}>Aggiungi attività</button>
           <button onClick={()=>setTab("log")} className={`px-3 py-2 rounded-xl border ${tab==="log"?"bg-black text-white":"bg-white"}`}>Log</button>
           <button onClick={()=>setTab("activities")} className={`px-3 py-2 rounded-xl border ${tab==="activities"?"bg-black text-white":"bg-white"}`}>Attività</button>
         </div>
 
-        {/* CONTENUTI TAB */}
         {tab==="add" && (
           <div className="rounded-2xl border bg-white p-3 md:p-6 space-y-4">
             <h2 className="text-xl font-semibold">Registra una nuova attività</h2>
@@ -352,7 +471,11 @@ export default function FantavacanzaApp() {
                 {players.map((p,i)=>(
                   <div key={p.id} className="border rounded-2xl p-3 bg-white">
                     <div className="flex flex-col items-center gap-2">
-                      <img src={p.avatar || ("https://api.dicebear.com/8.x/thumbs/svg?seed="+encodeURIComponent(p.name))} alt={p.name} className="w-14 h-14 md:w-16 md:h-16 rounded-full object-cover"/>
+                    <img
+                      src={p.avatar_url || ("https://api.dicebear.com/8.x/thumbs/svg?seed=" + encodeURIComponent(p.name))}
+                      alt={p.name}
+                      className="w-14 h-14 md:w-16 md:h-16 rounded-full object-cover"
+                    />
                       <label className={`text-xs inline-flex items-center gap-1 px-2 py-1 rounded-full border cursor-pointer ${!canEdit?"opacity-50 pointer-events-none":""}`}>
                         <ImageIcon className="w-3 h-3"/> Carica
                         <input type="file" accept="image/*" className="hidden" disabled={!canEdit} onChange={(e)=>e.target.files?.[0] && onAvatarChange(p.id, e.target.files[0])}/>
@@ -385,18 +508,18 @@ export default function FantavacanzaApp() {
                 <tbody>
                   {events.map(e=>(
                     <tr key={e.id} className="border-t">
-                      <td className="p-3 hidden md:table-cell">{new Date(e.ts).toLocaleString()}</td>
+                      <td className="p-3 hidden md:table-cell">{new Date(Number(e.ts)).toLocaleString()}</td>
                       <td className="p-3">{e.day ?? Math.max(1,Math.floor((e.ts-baseTs)/86400000)+1)}</td>
-                      <td className="p-3">{players.find(p=>p.id===e.playerId)?.name}</td>
-                      <td className="p-3">{activityById[e.activityId]?.name}</td>
+                      <td className="p-3">{players.find(p=>p.id===e.player_id)?.name}</td>
+                      <td className="p-3">{activityById[e.activity_id]?.name}</td>
                       <td className="p-3 text-right font-medium">{e.points}</td>
                       <td className="p-3 max-w-[20ch] truncate hidden md:table-cell" title={e.note}>{e.note}</td>
                       <td className="p-3 text-right">
                         <div className="flex justify-end gap-2">
-                          <button disabled={!canEdit} className="rounded-xl border px-2 py-1 disabled:opacity-50" onClick={()=>{ const newNote=prompt("Modifica nota", e.note||""); if(newNote!==null) updateEvent(e.id,{note:newNote}); }}>
+                          <button disabled={!canEdit} className="rounded-xl border px-2 py-1 disabled:opacity-50" onClick={()=>{ const newNote=prompt("Modifica nota", e.note||""); if(newNote!==null) updateEvent(e.id,{ note:newNote }); }}>
                             <Pencil className="w-4 h-4"/>
                           </button>
-                          <button disabled={!canEdit} className="rounded-xl border px-2 py-1 disabled:opacity-50" onClick={()=>{ const newAct=prompt("Cambia attività (inserisci ID)", e.activityId); const act=activities.find(a=>a.id===newAct); if(act) updateEvent(e.id,{activityId:act.id,points:act.points}); else if(newAct!==null) toast.error("ID attività non trovato"); }}>
+                          <button disabled={!canEdit} className="rounded-xl border px-2 py-1 disabled:opacity-50" onClick={()=>{ const newAct=prompt("Cambia attività (inserisci ID)", e.activity_id); const act=activities.find(a=>a.id===newAct); if(act) updateEvent(e.id,{ activity_id: act.id, points: act.points }); else if(newAct!==null) toast.error("ID attività non trovato"); }}>
                             ID
                           </button>
                           <button disabled={!canEdit} className="rounded-xl border px-2 py-1 disabled:opacity-50" onClick={()=>deleteEvent(e.id)}>
@@ -447,7 +570,6 @@ export default function FantavacanzaApp() {
           </div>
         )}
 
-        {/* FAB */}
         {canEdit && (
           <button
             aria-label="Aggiungi attività"
@@ -458,7 +580,7 @@ export default function FantavacanzaApp() {
           </button>
         )}
 
-        <footer className="text-xs text-slate-500 text-center py-6">Made with ❤️ — Fantavacanza v1.3</footer>
+        <footer className="text-xs text-slate-500 text-center py-6">Made with ❤️ — Fantavacanza v1.4</footer>
       </div>
     </div>
   );
