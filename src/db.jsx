@@ -61,3 +61,25 @@ export async function dbInsertActivity(activity) {
   if (error) throw error;
   return data;
 }
+
+export function dbSubscribeActivities(onChange) {
+  const channel = supabase
+    .channel('realtime-activities')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'activities' }, (payload) => {
+      onChange?.(payload);
+    })
+    .subscribe();
+  return () => supabase.removeChannel(channel);
+}
+
+export function dbSubscribePlayers(onChange) {
+  const channel = supabase
+    .channel('realtime-players')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'players' }, (payload) => {
+      onChange?.(payload);
+    })
+    .subscribe();
+  return () => supabase.removeChannel(channel);
+}
+
+

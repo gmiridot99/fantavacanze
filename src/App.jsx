@@ -15,7 +15,10 @@ import {
   dbSubscribeEvents,
   dbUpdatePlayerAvatarUrl,
   dbInsertActivity,
+  dbSubscribeActivities,
+  dbSubscribePlayers,
 } from "./db";
+
 
 import { supabase } from "./supabaseClient";
 
@@ -105,6 +108,31 @@ export default function FantavacanzaApp() {
     });
     return () => unsub();
   }, [baseTs]);
+
+
+  useEffect(() => {
+  const unsubAct = dbSubscribeActivities(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('activities')
+        .select('*');
+      if (!error) setActivities(data || []);
+    } catch {}
+  });
+  return () => unsubAct();
+}, []);
+
+useEffect(() => {
+  const unsubPlayers = dbSubscribePlayers(async () => {
+    try {
+      const { data, error } = await supabase.from('players').select('*');
+      if (!error) setPlayers(data || []);
+    } catch {}
+  });
+  return () => unsubPlayers();
+}, []);
+
+
 
   useEffect(() => { if (!players.find(p => p.id === selPlayer)) setSelPlayer(players[0]?.id || ""); }, [players]);
   useEffect(() => { if (!activities.find(a => a.id === selActivity)) setSelActivity(activities[0]?.id || ""); }, [activities]);
