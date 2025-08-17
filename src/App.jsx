@@ -261,55 +261,45 @@ async function addActivityFromDashboard() {
   }
 
   async function onUploadActivities(file) {
-    if (!canEdit || !file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const { header, rows } = parseCSV(String(reader.result || ""));
-        const lc = header.map(h => (h || "").trim().toLowerCase());
+  if (!canEdit || !file) return;
+  const reader = new FileReader();
 
-        const idxName = lc.findIndex(h => ["attivita", "attività", "name"].includes(h));
-        const idxPts  = lc.findIndex(h => ["punteggio", "points"].includes(h));
-        const idxId   = lc.findIndex(h => ["id", "activity_id"].includes(h));
+  reader.onload = async () => {
+    try {
+      const { header, rows } = parseCSV(String(reader.result || ""));
+      const lc = header.map(h => (h || "").trim().toLowerCase());
 
-        const exclude = new Set(["attivita", "attività", "name", "punteggio", "points", "premi extra"]);
-        const maybePlayersHeaders = header.filter(h => !exclude.has((h || "").trim().toLowerCase()));
+      const idxName = lc.findIndex(h => ["attivita", "attività", "name"].includes(h));
+      const idxPts  = lc.findIndex(h => ["punteggio", "points"].includes(h));
+      const idxId   = lc.findIndex(h => ["id", "activity_id"].includes(h));
 
-        const acts = rows.map((r, i) => {
-          const id = idxId >= 0 && r[idxId] ? r[idxId] : `CSV_${i + 1}`;
-          const nm = idxName >= 0 ? r[idxName] : `Attività ${i + 1}`;
-          const rawPts = idxPts >= 0 ? r[idxPts] : "0";
-          const points = Number(String(rawPts).replace(",", ".")) || 0;
-          return { id: String(id).trim(), name: String(nm).trim(), points };
-        }).filter(a => a.name);
+      const acts = rows.map((r, i) => {
+        const id = idxId >= 0 && r[idxId] ? r[idxId] : `CSV_${i + 1}`;
+        const nm = idxName >= 0 ? r[idxName] : `Attività ${i + 1}`;
+        const rawPts = idxPts >= 0 ? r[idxPts] : "0";
+        const points = Number(String(rawPts).replace(",", ".")) || 0;
+        return { id: String(id).trim(), name: String(nm).trim(), points };
+      }).filter(a => a.name);
 
-        if (!acts.length) throw new Error("no activities");
+      if (!acts.length) throw new Error("no activities");
 
-        setActivities(acts);
-        setSelActivity(acts[0]?.id || "");
+      // aggiorna UI
+      setActivities(acts);
+      setSelActivity(acts[0]?.id || "");
 
-        let pls = [];
-        if (maybePlayersHeaders.length) {
-          pls = maybePlayersHeaders
-            .map((n, i) => ({ id: `P${i + 1}`, name: (n || "").trim(), color: palette[i % palette.length] }))
-            .slice(0, 12);
-          if (pls.length) {
-            setPlayers(pls);
-            setSelPlayer(pls[0]?.id || "");
-          }
-        }
+      // salva su Supabase
+      await dbUpsertActivities(acts);
 
-        await dbUpsertActivities(acts);
-        if (pls.length) await dbUpsertPlayers(pls);
+      toast.success(`Importate ${acts.length} attività (solo attività, niente giocatori)`);
+    } catch (e) {
+      console.error(e);
+      toast.error("CSV non valido");
+    }
+  };
 
-        toast.success(`Importate ${acts.length} attività (salvate su Supabase)`);
-      } catch (e) {
-        console.error(e);
-        toast.error("CSV non valido");
-      }
-    };
-    reader.readAsText(file);
-  }
+  reader.readAsText(file);
+}
+
 
   function exportLogCSV(){
     const headers=["event_id","day","timestamp","player","activity","points","note"];
