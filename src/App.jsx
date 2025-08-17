@@ -11,7 +11,7 @@ import {
   dbUpsertActivities,
   dbInsertEvent,
   dbDeleteEvent,
-  dbResetEvents,
+  // dbResetEvents,
   dbSubscribeEvents,
   dbUpdatePlayerAvatarUrl,
   dbInsertActivity,
@@ -70,6 +70,8 @@ export default function FantavacanzaApp() {
   const noteRef = useRef(null);
   const [newActName, setNewActName] = useState("");
   const [newActPoints, setNewActPoints] = useState("");
+  const [deletingId, setDeletingId] = useState(null);
+
 
 
   useEffect(() => {
@@ -244,21 +246,45 @@ async function addActivityFromDashboard() {
   }
 
   async function deleteEvent(id) {
-    if (!canEdit) return;
-    try { await dbDeleteEvent(id); } catch (e) { console.error(e); }
-  }
+  if (!canEdit) return;
 
-  async function resetScores() {
-    if (!canEdit) return;
-    try {
-      await dbResetEvents();
-      setBaseTs(startOfToday());
-      setDayNum(1);
-      toast.success("Punteggi resettati");
-    } catch (e) {
-      console.error(e); toast.error("Errore reset");
-    }
+  const evt = events.find(e => e.id === id);
+  const playerName = players.find(p => p.id === evt?.player_id)?.name || "?"
+  const actName = activityById[evt?.activity_id]?.name || "?"
+
+  const ok = confirm(`Eliminare questo log?\n\nGiocatore: ${playerName}\nAttività: ${actName}\nPunti: ${evt?.points ?? 0}\nGiorno: ${evt?.day ?? Math.max(1, Math.floor((evt?.ts - baseTs)/86400000)+1)}`);
+  if (!ok) return;
+
+  // aggiornamento ottimistico
+  const prev = events;
+  setDeletingId(id);
+  setEvents(list => list.filter(e => e.id !== id));
+
+  try {
+    await dbDeleteEvent(id);
+    toast.success("Log eliminato");
+  } catch (e) {
+    console.error(e);
+    // rollback
+    setEvents(prev);
+    toast.error("Errore durante l’eliminazione");
+  } finally {
+    setDeletingId(null);
   }
+}
+
+
+  // async function resetScores() {
+  //   if (!canEdit) return;
+  //   try {
+  //     await dbResetEvents();
+  //     setBaseTs(startOfToday());
+  //     setDayNum(1);
+  //     toast.success("Punteggi resettati");
+  //   } catch (e) {
+  //     console.error(e); toast.error("Errore reset");
+  //   }
+  // }
 
   async function onUploadActivities(file) {
   if (!canEdit || !file) return;
@@ -386,9 +412,9 @@ async function addActivityFromDashboard() {
             <button onClick={undoLast} disabled={!canEdit} className="inline-flex items-center gap-2 rounded-2xl border px-3 py-2 w-full sm:w-auto disabled:opacity-50">
               <Undo2 className="w-4 h-4"/> Undo
             </button>
-            <button onClick={resetScores} disabled={!canEdit} className="inline-flex items-center gap-2 rounded-2xl px-3 py-2 w-full sm:w-auto bg-red-600 text-white border border-red-700 hover:bg-red-700 disabled:opacity-50">
+            {/* <button onClick={resetScores} disabled={!canEdit} className="inline-flex items-center gap-2 rounded-2xl px-3 py-2 w-full sm:w-auto bg-red-600 text-white border border-red-700 hover:bg-red-700 disabled:opacity-50">
               Reset punteggi
-            </button>
+            </button> */}
             {canEdit && (
               <Button variant="outline" onClick={() => setShowShare(s => !s)} className="w-full sm:w-auto">
                 Condividi
@@ -609,9 +635,20 @@ async function addActivityFromDashboard() {
                           <button disabled={!canEdit} className="rounded-xl border px-2 py-1 disabled:opacity-50" onClick={()=>{ const newAct=prompt("Cambia attività (inserisci ID)", e.activity_id); const act=activities.find(a=>a.id===newAct); if(act) updateEvent(e.id,{ activity_id: act.id, points: act.points }); else if(newAct!==null) toast.error("ID attività non trovato"); }}>
                             ID
                           </button>
-                          <button disabled={!canEdit} className="rounded-xl border px-2 py-1 disabled:opacity-50" onClick={()=>deleteEvent(e.id)}>
-                            <Trash2 className="w-4 h-4"/>
-                          </button>
+                          <button
+                              disabled={!canEdit || deletingId === e.id}
+                              className="rounded-xl border px-2 py-1 disabled:opacity-50"
+                              aria-label="Elimina log"
+                              onClick={() => deleteEvent(e.id)}
+                              title="Elimina"
+                            >
+                              {deletingId === e.id ? (
+                                <span className="inline-block w-4 h-4 animate-spin border border-current border-t-transparent rounded-full" />
+                              ) : (
+                                <Trash2 className="w-4 h-4" />
+                              )}
+                            </button>
+
                         </div>
                       </td>
                     </tr>
