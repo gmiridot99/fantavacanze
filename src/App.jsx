@@ -14,7 +14,9 @@ import {
   dbResetEvents,
   dbSubscribeEvents,
   dbUpdatePlayerAvatarUrl,
+  dbInsertActivity,
 } from "./db";
+
 import { supabase } from "./supabaseClient";
 
 /* ---------- CSV helpers ---------- */
@@ -63,6 +65,9 @@ export default function FantavacanzaApp() {
   const [showShare, setShowShare] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
   const noteRef = useRef(null);
+  const [newActName, setNewActName] = useState("");
+  const [newActPoints, setNewActPoints] = useState("");
+
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -144,27 +149,54 @@ export default function FantavacanzaApp() {
   }, [events, players, baseTs]);
 
   async function addEvent() {
-    if (!canEdit) return;
-    if (!selPlayer || !selActivity) { toast.error("Seleziona giocatore e attività"); return; }
-    const act = activityById[selActivity]; if (!act) { toast.error("Attività non valida"); return; }
+  if (!canEdit) return;
+  if (!selPlayer || !selActivity) { toast.error("Seleziona giocatore e attività"); return; }
+  const act = activityById[selActivity]; if (!act) { toast.error("Attività non valida"); return; }
 
-    const d = Math.max(1, Math.floor(Number(dayNum)) || 1);
-    const ts = baseTs + (d - 1) * 86400000;
+  const d = (dayNum == null || dayNum === "" || Number.isNaN(Number(dayNum)))
+    ? Math.max(1, Math.floor((Date.now() - baseTs) / 86400000) + 1)
+    : Math.max(1, Math.floor(Number(dayNum)));
+  const ts = baseTs + (d - 1) * 86400000;
 
-    try {
-      await dbInsertEvent({
-        player_id: selPlayer,
-        activity_id: selActivity,
-        points: Number(act.points) || 0,
-        note: noteRef.current?.value || "",
-        ts, day: d,
-      });
-      if (noteRef.current) noteRef.current.value = "";
-      toast.success("Attività registrata ✨");
-    } catch (e) {
-      console.error(e); toast.error("Errore salvataggio");
-    }
+  try {
+    await dbInsertEvent({
+      player_id: selPlayer,
+      activity_id: selActivity,
+      points: Number(act.points) || 0,
+      note: noteRef.current?.value || "",
+      ts, day: d,
+    });
+    if (noteRef.current) noteRef.current.value = "";
+    toast.success("Attività registrata ✨");
+  } catch (e) {
+    console.error(e); toast.error("Errore salvataggio");
   }
+}
+
+async function addActivityFromDashboard() {
+  if (!canEdit) return;
+  const name = newActName.trim();
+  if (!name) { toast.error("Inserisci un nome attività"); return; }
+
+  const pointsNum = Number(newActPoints);
+  const points = Number.isFinite(pointsNum) ? pointsNum : 0;
+
+  // Genero un id client-side (la tabella richiede PK testuale)
+  const id = `A_${Date.now()}`;
+
+  try {
+    const created = await dbInsertActivity({ id, name, points });
+    setActivities((prev) => [...prev, created]);
+    setSelActivity(created.id);
+    setNewActName("");
+    setNewActPoints("");
+    toast.success("Attività aggiunta ✅");
+  } catch (e) {
+    console.error(e);
+    toast.error("Errore salvataggio attività");
+  }
+}
+
 
   async function undoLast() {
     if (!canEdit) return;
@@ -390,28 +422,52 @@ export default function FantavacanzaApp() {
         )}
 
         <div className="rounded-2xl border bg-white p-3 md:p-6 space-y-4">
-          <h2 className="text-xl font-semibold">Classifica</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
-            {leaderboard.map((p, idx) => {
-              const s = scores.get(p.id) || { total: 0, maxSingle: -Infinity };
-              return (
-                <motion.div key={p.id} layout className="border rounded-2xl p-3 flex flex-col items-center text-center bg-white" style={{ borderColor: players.find(x=>x.id===p.id)?.color, borderWidth: 2 }}>
-                  <div className="relative">
-                    <img
-                      src={p.avatar_url || ("https://api.dicebear.com/8.x/thumbs/svg?seed=" + encodeURIComponent(p.name))}
-                      alt={p.name}
-                      className="w-14 h-14 md:w-16 md:h-16 rounded-full object-cover"
-                    />
+<h2 className="text-lg font-semibold">Classifica</h2>
 
-                    <span className="absolute -top-2 -right-2 rounded-full text-xs bg-black text-white px-2 py-1">{idx+1}</span>
-                  </div>
-                  <div className="mt-2 font-medium truncate max-w-[10rem]">{p.name}</div>
-                  <div className="text-2xl font-bold">{s.total}</div>
-                  <div className="text-xs text-slate-500">Max singolo: {s.maxSingle===-Infinity?0:s.maxSingle}</div>
-                </motion.div>
-              );
-            })}
+<div className="space-y-2">
+  {leaderboard.map((p, idx) => {
+    const s = scores.get(p.id) || { total: 0, maxSingle: -Infinity };
+    return (
+      <motion.div
+        key={p.id}
+        layout
+        className="border rounded-xl p-2 bg-white flex items-center gap-2"
+        style={{
+          borderColor: players.find(x => x.id === p.id)?.color || undefined,
+          borderWidth: 2,
+        }}
+      >
+        {/* Avatar più piccolo */}
+        <div className="relative shrink-0">
+          <img
+            src={
+              p.avatar_url ||
+              "https://api.dicebear.com/8.x/thumbs/svg?seed=" +
+                encodeURIComponent(p.name)
+            }
+            alt={p.name}
+            className="w-10 h-10 rounded-lg object-cover"
+          />
+          <span className="absolute -top-2 -right-2 rounded-full text-[10px] bg-black text-white px-1">
+            {idx + 1}
+          </span>
+        </div>
+
+        {/* Nome e info */}
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium truncate">{p.name}</div>
+          <div className="text-[10px] text-slate-500">
+            Max: {s.maxSingle === -Infinity ? 0 : s.maxSingle}
           </div>
+        </div>
+
+        {/* Punteggio */}
+        <div className="text-lg font-bold tabular-nums">{s.total}</div>
+      </motion.div>
+    );
+  })}
+</div>
+
           <div className="h-56 sm:h-64 md:h-80 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={dailySeries.data} margin={{ top: 10, right: 20, bottom: 0, left: 0 }}>
@@ -456,8 +512,21 @@ export default function FantavacanzaApp() {
               </div>
               <div>
                 <div className="text-sm mb-1">Giorno</div>
-                <input type="number" min={1} className="border rounded-lg px-3 py-2 w-full" value={dayNum} onChange={(e)=>setDayNum(Number(e.target.value)||1)} disabled={!canEdit}/>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  placeholder="oggi"
+                  className="border rounded-lg px-3 py-2 w-full"
+                  value={dayNum ?? ""}
+                  onChange={(e)=>{
+                    const v = e.target.value.trim();
+                    setDayNum(v === "" ? null : Number(v) || null);
+                  }}
+                  disabled={!canEdit}
+                />
               </div>
+
               <div className="flex items-end">
                 <button onClick={addEvent} disabled={!canEdit} className="w-full rounded-xl px-3 py-2 bg-orange-500 hover:bg-orange-600 text-white border border-orange-600 disabled:opacity-50">
                   <span className="inline-flex items-center gap-2"><Plus className="w-4 h-4"/>Aggiungi</span>
@@ -541,40 +610,79 @@ export default function FantavacanzaApp() {
         )}
 
         {tab==="activities" && (
-          <div className="rounded-2xl border bg-white p-0">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-slate-50">
-                  <tr>
-                    <th className="text-left p-3">ID</th>
-                    <th className="text-left p-3">Nome</th>
-                    <th className="text-right p-3">Punti</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {activities.map(a=>(
-                    <tr key={a.id} className="border-t">
-                      <td className="p-3 font-mono text-xs">{a.id}</td>
-                      <td className="p-3">{a.name}</td>
-                      <td className="p-3 text-right font-medium">{a.points}</td>
-                    </tr>
-                  ))}
-                  {activities.length===0 && (
-                    <tr>
-                      <td colSpan={3} className="p-6 text-center text-slate-500">Carica un CSV per iniziare.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+  <div className="rounded-2xl border bg-white p-0">
+    {/* Form per aggiungere attività */}
+    {canEdit && (
+      <div className="p-4 border-b bg-white">
+        <h3 className="font-semibold mb-3">➕ Aggiungi attività</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+          <div>
+            <div className="text-sm mb-1">Nome attività</div>
+            <input
+              type="text"
+              className="border rounded-lg px-3 py-2 w-full"
+              placeholder="Es. Tuffo epico"
+              value={newActName}
+              onChange={(e)=>setNewActName(e.target.value)}
+            />
           </div>
-        )}
+          <div>
+            <div className="text-sm mb-1">Punti</div>
+            <input
+              type="number"
+              className="border rounded-lg px-3 py-2 w-full"
+              placeholder="Es. 5"
+              value={newActPoints}
+              onChange={(e)=>setNewActPoints(e.target.value)}
+            />
+          </div>
+          <div className="flex">
+            <button
+              onClick={addActivityFromDashboard}
+              className="w-full rounded-xl px-3 py-2 bg-orange-500 hover:bg-orange-600 text-white border border-orange-600"
+            >
+              Aggiungi
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Tabella attività */}
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50">
+          <tr>
+            <th className="text-left p-3">ID</th>
+            <th className="text-left p-3">Nome</th>
+            <th className="text-right p-3">Punti</th>
+          </tr>
+        </thead>
+        <tbody>
+          {activities.map(a=>(
+            <tr key={a.id} className="border-t">
+              <td className="p-3 font-mono text-xs">{a.id}</td>
+              <td className="p-3">{a.name}</td>
+              <td className="p-3 text-right font-medium">{a.points}</td>
+            </tr>
+          ))}
+          {activities.length===0 && (
+            <tr>
+              <td colSpan={3} className="p-6 text-center text-slate-500">Nessuna attività. Aggiungine una sopra 👆</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  </div>
+)}
+
 
         {canEdit && (
           <button
             aria-label="Aggiungi attività"
             onClick={()=>setTab("add")}
-            className="sm:hidden fixed bottom-24 right-4 rounded-full w-14 h-14 shadow-lg z-50 bg-orange-500 hover:bg-orange-600 text-white"
+            className="hidden sm:hidden fixed bottom-24 right-4 rounded-full w-14 h-14 shadow-lg z-50 bg-orange-500 hover:bg-orange-600 text-white"
           >
             <Plus className="w-6 h-6 m-auto"/>
           </button>

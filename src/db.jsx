@@ -50,3 +50,14 @@ export function dbSubscribeEvents(onChange) {
     .subscribe()
   return () => supabase.removeChannel(ch)
 }
+
+export async function dbInsertActivity(activity) {
+  // activity: { id, name, points }
+  const { data, error } = await supabase
+    .from("activities")
+    .insert([activity])
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
